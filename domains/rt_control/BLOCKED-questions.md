@@ -2204,3 +2204,82 @@ Only tasks listed under each question are blocked. Unrelated tasks continue in u
   “恰好一个 `rtcan-master`”门禁会 fail-fast，需要重新裁决命名和绑定策略。
 - Verification boundary：本裁决只解决目标主站线程归属，不替代 CAN 总线物理层、USB-CAN 适配器、tx/rx 队列或驱动器
   heartbeat consumer 的长稳验证；CAN error counters、EMCY/heartbeat 故障注入和导航联调压力仍需单独记录。
+
+## BQ-130 — ELECTRI-102 滚动关节控制器、稳态模式接管与既有安全路径 [RESOLVED/HIGH-RISK 2026-08-18]
+
+- Evidence：ELECTRI-102 要求 Motion 在运动中持续替换短未来完整关节目标，由 rt-control 本地以 250 Hz 或更高频率
+  采样、插值、限幅并驱动；迟到/乱序/历史目标不得追赶，输入中断必须有界降级。当前 `dual_arm_jtc` 只负责完整 14 轴
+  FollowJointTrajectory，冻结补丁只接入 Action goal admission；`enable_manager` 的 disable、group fault 和意外掉
+  Operation Enabled 路径又只硬编码停用 JTC。现有硬件暴露 14 个 position command/state，不暴露 velocity command/state。
+- Conflict：把 rolling session/buffer/watchdog 加进 JTC 会扩大 BQ-019 的窄补丁并重写上游通用控制器行为；另建
+  controller 却不泛化 `enable_manager`，会在 rolling ACTIVE 时错误停用已 INACTIVE 的 JTC、遗漏真正的运动控制器并把
+  switch 状态误锁为不确定。若在 FJT 仍运动时直接切到 rolling 并从 actual position hold，会产生未经过受控减速的
+  position-command 阶跃；订阅 Action status 也不能作为无竞态切换门。
+- User decision：批准 ELECTRI-102 Gate 0 默认方案，在功能分支实现到 Mock Checkpoint F1；生产动态限制继续保持 TBD，
+  不授权目标机或实机动作。
+- Architecture decision：新增独立 `rolling_trajectory_controller` ros2_control 插件，保留 `dual_arm_jtc` 的普通完整
+  14 轴 FJT 和 BQ-019 补丁边界。两者声明相同的 14 个 position command interfaces，任何时刻至多一个 ACTIVE；
+  `enable_manager` 是唯一 controller-manager STRICT switch owner，Motion 不得绕过它直接切 controller。
+- Normal switch decision：V1 不向 Motion 暴露运动中 force switch。进入 rolling 前，Motion 先 cancel 自己持有的 FJT
+  并等待 Action result；rt-control 再要求完整 14 轴 position state 有限、连续 N 周期稳态，并要求切换前持久 position
+  command 有限且与 actual 的误差在经批准接管阈值内。rolling 首周期保持该已校验的 source command，以维持 command
+  C0，而不是直接跳到 actual。N、稳态阈值、接管误差均为证据参数；未冻结前只能使用明确 test-only 值，不能进入生产。
+- FJT result decision：mode service 不声称能查询 active goal。成功停用 JTC 时，若仍有在途 goal，pinned JTC 原生
+  `on_deactivate()` 负责 abort，FJT 客户端收到的 Action result 是 goal 终态权威；mode response 只回报 source
+  controller 是否停用、target 是否激活。若发现 goal accepted/deactivate 竞态会让旧 goal 在重激活后复活，必须停下并
+  新开裁决，不能静默扩大 JTC 补丁。
+- Session decision：rolling controller 独占 boot/session/generation/sequence、固定容量未来缓冲、authoritative suffix、
+  连续性/限值/可停车性校验、输入更新年龄、低水位、有界停止和 public state。timeout、queue exhaustion、producer
+  restart、controller restart 或 fault 后不自动恢复；terminal hold 后必须 close，再 fresh open。活动 session 中请求切回
+  FJT 一律拒绝；先 close 到 terminal hold，再做同样的稳态接管。
+- Safety/lifecycle decision：BQ-041/BQ-042/BQ-044/BQ-059 中“停用 JTC”的实现载体扩展为“停用当前 active motion
+  controller”，但 quick stop、control-word、downward、restart-only 和 disable 优先级保持原义。disable/group fault/
+  unexpected Operation Enabled loss 可从任意 rolling 状态抢占；与在途 mode switch 竞争时沿用 BQ-058/BQ-080，结果
+  不确定即 `restart_required`。该扩展必须先建立现有 `enable_manager` characterization tests，再分成无行为重构和新语义
+  接入两步。
+- Feedback-age decision：rolling open 可复用 BQ-020/BQ-021 的
+  `ethercat_domain/process_data_age_ms <= 500 ms` admission 证据，并声明该共享 state interface；运行中 process-data age/WC
+  继续遵守 BQ-045 的 WARN-only 策略，不新增基于反馈 age 的自动停车。rolling 自己的 update-age/low-water 只约束本 session
+  的输入数据，不恢复 BQ-006 禁止的独立 `rt_watchdog` 或 motion/autonomy heartbeat。
+- Joint-state decision：ELECTRI-102 不修改 BQ-068；`/joint_states` 保持 50 Hz。rolling 的 250 Hz command loop 直接读取同进程
+  ros2_control state interfaces，不能等待 `/joint_states` DDS 回环。
+- Benefit：rolling 的实时所有权、替换和停止不变量可在纯 C++/fake hardware 中独立验证，同时保留普通 FJT、硬件
+  quick-stop 和既有使能语义；稳态接管避免把模式切换变成无界位置阶跃。
+- Drawback（重点）：新增一个安全关键 controller 和 `enable_manager` 泛化，测试面明显扩大。position-only hardware 无法直接
+  观测实际 qdot，稳态只能用 250 Hz position 有限差分和跟踪误差证据；C1 停车不保证加速度连续，生产限制、阈值、QoS、
+  horizon、timeout 和 guard 在证据冻结前都不是 production-ready。
+- Verification boundary：先完成协议/动态包络文档、enable_manager 回归基线、固定容量纯核心、controller/fake CiA402、
+  Motion Mock 和异常矩阵。接口包与 `docs/cross-domain-interfaces.md` 必须原子冻结。任何目标机非运动压测、controller
+  activation、`/rt/enable`、SDO write 或真实运动仍需各自单独授权；本裁决本身不授权这些动作。
+
+## BQ-131 — ELECTRI-102 模式切换前的 source-command 证据与返回 JTC 的 C0 语义 [OPEN/HIGH-RISK 2026-08-18]
+
+- Evidence：T4-01 已把 `enable_manager` 重构为 motion-controller registry，并在 controller-manager 明确成功后记录当前
+  active controller；旧 FJT enable/disable/fault characterization 仍全绿。进入 T4-02 后，代码级检查确认
+  `enable_manager` 当前只能声明/读取 CiA402 `status_word`，即使按计划新增 14 个 position state，也只能看到 actual。
+  JTC 与 rolling controller 互斥独占同一组 14 个 position command interfaces，`enable_manager` 不能在 source ACTIVE
+  时再 claim 它们。rolling controller 只有在 STRICT switch 已开始、source 已释放资源后，才能在 `on_activate()` 读取
+  精确的持久 command 并做最终 residual 检查。
+- Evidence：pinned JTC 的 controller-state `output.positions` 是其周期发布时读取的 command interface 值，可作为带年龄的
+  非 RT 快照，但默认仅 50 Hz，且 DDS 快照与随后 controller-manager switch 不原子。另一方面，BQ-044 冻结
+  `set_last_command_interface_value_as_state_on_activation: false`；JTC 从 rolling 返回时会从 actual seed hold，而不是保持
+  source command。因此只要允许非零 takeover tolerance，返回 JTC 的 command 变化只能被有界，不能宣称严格 C0。
+- Conflict：当前协议要求 mode server 在调用 controller-manager 之前确定性区分 `SourceMoving` 与 `TakeoverMismatch`，执行计划
+  又写了“command 不阶跃”和单次 STRICT source→target switch。现有接口只能同时满足其中一部分。直接在 Mock 中把
+  source command 当作 actual，会绕过唯一需要验证的接管残差；把 target activation 的通用 `ok=false` 冒充为事前
+  `TakeoverMismatch`，则违反“此前失败不得调用 controller-manager”的协议向量 V-33。
+- Option A（推荐用于继续 Mock F1）：显式冻结一个双层证据模型。`enable_manager` 以带接收年龄的
+  `/dual_arm_jtc/controller_state.output.positions` 和 rolling public-state `desired_positions` 做事前 admission，并继续用
+  250 Hz 直接 position state 做 N 周期有限差分；FJT→rolling 再由 rolling `on_activate()` 对 switch 边界上的持久 command
+  做最终精确 residual 检查。rolling→JTC 保留 BQ-044，从 actual seed hold；把合同修正为“切换步长不超过已验证 takeover
+  tolerance”，不再声称该方向严格 C0。source 快照年龄、N、速度阈值和 residual 阈值全部保持 test-only/production TBD。
+- Option A benefit/cost：不扩大 JTC 或硬件 driver patch，能够继续纯 fake/mock；但 source command admission 是有年龄的快照，
+  不是与 switch 原子的读数。目标 rolling 的二次校验可 fail closed，返回 JTC 则依赖 BQ-044 actual hold 和生产阈值证据。
+- Option B（更强但扩大范围）：由 hardware abstraction 导出 14 个只读 last-position-command mirror state interfaces，并为
+  JTC 增加只在受信 mode handoff 时从该 command seed hold 的窄机制；`enable_manager` 在同一 ros2_control 周期读取 actual 与
+  command mirror。这样可接近双向 C0 和准确事前分类，但会新增 EtherCAT/mock 接口并重新打开 BQ-019/BQ-044 的 JTC
+  patch 边界，超出已批准 T4-02 文件/评审范围。
+- Decision needed：批准 Option A 并相应收窄 rolling→JTC 的 C0 声明，或明确扩大到 Option B。未决前 T4-02 不实现会伪造
+  source-command 权威性的 mode service；T3-05/T4-01 及普通 FJT 路径不受影响。
+- Verification boundary：本问题只涉及本机 source-command 证据、mock switch 和合同文字；无论选择哪项，都不授权目标机、
+  controller activation、总线、使能或运动验证。

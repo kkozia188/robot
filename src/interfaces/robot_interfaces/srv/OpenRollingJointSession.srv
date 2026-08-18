@@ -1,0 +1,58 @@
+uint16 PROTOCOL_MAJOR=1
+uint16 PROTOCOL_MINOR=0
+
+uint16 protocol_major
+uint16 protocol_minor
+unique_identifier_msgs/UUID request_id
+unique_identifier_msgs/UUID expected_controller_boot_id
+unique_identifier_msgs/UUID client_instance_id
+uint8[32] axis_set_hash
+---
+uint8 ERROR_NONE=0
+uint8 ERROR_WRONG_PROTOCOL=1
+uint8 ERROR_WRONG_REQUEST=2
+uint8 ERROR_WRONG_MODE=3
+uint8 ERROR_NOT_ENABLED=4
+uint8 ERROR_SESSION_BUSY=5
+uint8 ERROR_SESSION_EXISTS=6
+uint8 ERROR_WRONG_BOOT=7
+uint8 ERROR_WRONG_SESSION=8
+uint8 ERROR_WRONG_CLIENT=9
+uint8 ERROR_AXIS_SET_MISMATCH=10
+uint8 ERROR_SOURCE_MOVING=11
+uint8 ERROR_TAKEOVER_MISMATCH=12
+uint8 ERROR_UNSAFE_HOLD=13
+uint8 ERROR_FEEDBACK_STALE=14
+uint8 ERROR_LIMITS_UNAVAILABLE=15
+uint8 ERROR_SWITCH_REJECTED=16
+uint8 ERROR_SWITCH_TIMEOUT=17
+uint8 ERROR_RESTART_REQUIRED=18
+uint8 ERROR_NOT_READY=19
+
+uint64 CAPABILITY_CUBIC_HERMITE=1
+uint64 CAPABILITY_C1_SPLICE=2
+uint64 CAPABILITY_DIRECTIONAL_LIMITS=4
+uint64 CAPABILITY_SYNCHRONOUS_C1_STOP=8
+uint64 CAPABILITY_LATEST_VALID_PENDING=16
+
+uint8 SESSION_PRIMING=1
+
+bool success
+unique_identifier_msgs/UUID request_id
+uint8 error_code
+uint16 protocol_major
+uint16 protocol_minor
+unique_identifier_msgs/UUID controller_boot_id
+unique_identifier_msgs/UUID client_instance_id
+unique_identifier_msgs/UUID session_id
+uint8 session_state
+uint8[32] axis_set_hash
+uint8[32] limits_version
+uint64 capability_bits
+uint32 buffer_capacity
+uint64 max_horizon_ns
+uint64 required_initial_horizon_ns
+uint64 initial_replaceable_from_ns
+bool test_only_limits
+float64[14] hold_positions
+float64[14] hold_velocities

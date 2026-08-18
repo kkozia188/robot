@@ -75,6 +75,9 @@ enable_manager:
     controller_switch_timeout: 4.0
     service_result_timeout_ms: 30000
     jtc_name: dual_arm_jtc
+    motion_controller_names:
+      - dual_arm_jtc
+    default_motion_controller_name: dual_arm_jtc
 
 diff_drive_controller:
   ros__parameters:

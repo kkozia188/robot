@@ -55,6 +55,8 @@
 | `Q_STATE` | reliable / volatile / keep_last 小深度 | 中频状态（`/vacuum/state`、`/control/safety_state`） |
 | `Q_LATCHED` | reliable / transient_local / keep_last 1 | 版本与就绪基线（readiness、`/robot_model/info`、`/calibration/info`、`/map`、N-03） |
 | `Q_DIAGNOSTIC` | reliable / volatile / keep_last 10 | `/diagnostics` |
+| `Q_ROLLING_COMMAND` | **原型占位，非生产冻结**；reliability/history/deadline/lifespan 待 ELECTRI-102 压测 | rolling 权威未来批次；双方必须使用同一已批准 profile 版本 |
+| `Q_ROLLING_STATE` | **原型占位，非生产冻结**；reliability/history/deadline/lifespan/发布频率待 ELECTRI-102 压测 | rolling ack、buffer、stop 与模式状态 |
 | 标准 Action / Service QoS | ROS 2 默认 | 全部 Action 与 Service |
 
 ## 5. 接口总表
@@ -105,6 +107,10 @@ ID 前缀含义：`G` = Gateway/本地入口，`P` = Perception 提供，`N` = �
 | R-IN-03 | `/control/set_enabled` | Service / `alfa_control_interfaces/srv/SetControlEnabled` | 维护/生命周期工具 → RT-Control | 不复位急停、安全继电器或 STO；不属于箱级任务流程 |
 | R-IN-04 | `/vacuum/pump/set_enabled` | Service / `alfa_control_interfaces/srv/SetPumpEnabled` | 维护工具或 RT 内部管理器 → RT-Control | 活动真空命令或可能持箱时拒绝普通停泵 |
 | R-IN-05 | `/vacuum/grip` | Action / `alfa_control_interfaces/action/VacuumGrip` | Motion ⇄ RT-Control | 通道同数量/同集/同序；GRIP 每通道新鲜表压 `<= -50 kPa`；RELEASE 仍 `UNVERIFIED` |
+| R-IN-06 | `/rt/joint_control/set_mode` | Service / `robot_interfaces/srv/SetJointControlMode` | Motion → RT-Control | protocol `1.0`；expected-mode CAS；仅稳态接管；结果只描述 controller switch，不代替 FJT Action 终态 |
+| R-IN-07 | `/rt/rolling_joint_control/open` | Service / `robot_interfaces/srv/OpenRollingJointSession` | Motion → RT-Control | UUID boot/client/request；固定 axis SHA-256；单 session；返回 test-only 标志、能力、容量和初始 horizon |
+| R-IN-08 | `/rt/rolling_joint_control/update` | Topic / `robot_interfaces/msg/RollingJointTargetBatch` | Motion → RT-Control | `Q_ROLLING_COMMAND`；固定 14 轴 q/qdot；session 相对时间；authoritative suffix；schema 上限 256，运行容量由 open 返回 |
+| R-IN-09 | `/rt/rolling_joint_control/close` | Service / `robot_interfaces/srv/CloseRollingJointSession` | Motion → RT-Control | graceful 两阶段 close；Stopping 中幂等且不重建 stop；Holding 中首次新 request ID 才销毁 session |
 
 ### 5.5 RT-Control 输出
 
@@ -112,7 +118,7 @@ ID 前缀含义：`G` = Gateway/本地入口，`P` = Perception 提供，`N` = �
 | --- | --- | --- | --- | --- |
 | R-OUT-01 | `/tf`、`/tf_static` | Topic / `tf2_msgs/msg/TFMessage` | RT-Control 或状态发布器 → 全系统 | 本体坐标边唯一；静态/动态发布责任不重复；`map→odom` 不由本域发布 |
 | R-OUT-02 | `/wheel/odom` | Topic / `nav_msgs/msg/Odometry` | RT-Control → Perception | `Q_FAST_STATE`；50 Hz；最大年龄 200 ms；**不作为到站或停稳最终证据** |
-| R-OUT-03 | `/joint_states` | Topic / `sensor_msgs/msg/JointState` | RT-Control → Motion、Perception、Autonomy | 完整 14 轴；`Q_FAST_STATE`；100 Hz；最大年龄 200 ms |
+| R-OUT-03 | `/joint_states` | Topic / `sensor_msgs/msg/JointState` | RT-Control → Motion、Perception、Autonomy | 完整 14 轴；`Q_FAST_STATE`；**50 Hz（BQ-068）**；最大年龄 200 ms；不作为 250 Hz rolling 内环反馈 |
 | R-OUT-04 | `/battery_state` | Topic / `sensor_msgs/msg/BatteryState` | RT-Control → Autonomy、观测工具 | 1 Hz；只读，不作为业务控制入口 |
 | R-OUT-05 | `/vacuum/state` | Topic / `alfa_control_interfaces/msg/VacuumState` | RT-Control → Motion、Autonomy、观测工具 | `Q_STATE`；20～50 Hz；只 RT-Control 用于 GRIP 判定，其他域不自行计算成功 |
 | R-OUT-06 | `/control/safety_state` | Topic / `alfa_control_interfaces/msg/SafetyState` | RT-Control → Perception、Motion、Autonomy | `Q_STATE`；10～50 Hz；最大年龄 200 ms；deny 或过期时禁止新动作 |
@@ -120,6 +126,7 @@ ID 前缀含义：`G` = Gateway/本地入口，`P` = Perception 提供，`N` = �
 | R-OUT-08 | `/calibration/info` | Topic / `alfa_system_interfaces/msg/CalibrationInfo` | RT-Control → 各域 | `Q_LATCHED`；曝光前与返回前版本一致 |
 | R-OUT-09 | `/rt_control/readiness` | Topic / `alfa_system_interfaces/msg/DomainReadiness` | RT-Control → Autonomy、观测工具 | 故障立即 `ready=false`；变化立即发；稳定 1 Hz |
 | R-OUT-10 | `/diagnostics` | Topic / `diagnostic_msgs/msg/DiagnosticArray` | 各域 → 诊断聚合器 | `Q_DIAGNOSTIC`；不替代 Action Result、SafetyState、Gate 或硬安全链 |
+| R-OUT-11 | `/rt/rolling_joint_control/state` | Topic / `robot_interfaces/msg/RollingJointControlState` | RT-Control → Motion、观测工具 | `Q_ROLLING_STATE`；boot/session/generation/sequence、buffer/age、q/qdot、RejectCode 与 StopReason 分离；test-only limits 显式 |
 
 ## 6. 关键运行规则
 
@@ -139,6 +146,15 @@ Action 返回 ROS `SUCCEEDED` 时，服务端必须已实际完成本次功能�
 ### 6.2 完整 14 轴是一条不可拆分的轨迹
 
 R-IN-02 的 Goal 必须包含完整且唯一的 14 个 `joint_names`，每个轨迹点含 14 项 `positions`；`velocities`/`accelerations` 可空，非空时同样各含 14 项；`time_from_start` 严格递增。禁止部分关节 Goal，取消按整组生效。
+
+#### Rolling joint mode
+
+- Motion 先取消并等待自己持有的 FJT 终态，再按 R-IN-06 的 expected-mode CAS 请求稳态切换；不得直接调用 controller-manager，也没有运动中 force switch。
+- 进入 `ROLLING_READY` 后，Motion 按 R-IN-07 open、R-IN-08 prime/update、R-IN-09 stop/finalize close 的顺序使用唯一 session。`STOPPING`/`HOLDING` 不接受 update 恢复；重新运行必须 fresh open。
+- Service 调用方本地超时不等于服务端失败，也不能发新 request ID 重放；只用相同 client/request ID 查询幂等结果。switch timeout/部分结果不确定时进入 `RESTART_REQUIRED`，不自动回滚或重试。
+- update 的错误 batch 只更新 `RejectCode`，不等于 session 停止；session 停止原因只看独立 `StopReason`。错误 boot/session/client 的数据不得取得当前 session 所有权。
+- `/joint_states` 继续为 50 Hz 域外观测。rolling controller 在同进程 250 Hz update 中直接读 ros2_control state interfaces；Motion 不得用提高 `/joint_states` 频率替代未来缓冲。
+- `test_only_limits=true` 的 open/state 只授权 Mock/算法验证。生产动态限制、QoS、horizon、guard、timeout 和 tolerance 未经证据冻结时，不得激活生产 rolling 模式。
 
 ### 6.3 双箱序列是一个整体
 
@@ -295,7 +311,7 @@ G-01 `final_state` 三选一：`COMPLETED_UNVERIFIED` / `FAILED` / `CANCELED`。
 ### 10.3 时序与频率
 
 - [ ] RT-Control 250 Hz 实时控制循环满足本机时序要求，且未跨容器。
-- [ ] `/odom` 50 Hz，`/joint_states` 100 Hz；超过 200 ms 后不再作为新鲜状态证据。
+- [ ] `/odom` 50 Hz，`/joint_states` 50 Hz；超过 200 ms 后不再作为新鲜状态证据。
 - [ ] `/cmd_vel_safe` 停发或过期后 RT-Control 在 200 ms 内本地停车。
 - [ ] N-03、M-07、SafetyState 使用 200 ms 严格时效，未套用 readiness 的 1 s 宽限。
 

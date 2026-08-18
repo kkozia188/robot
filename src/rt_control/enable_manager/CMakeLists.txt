@@ -35,6 +35,29 @@ ament_target_dependencies(
   rt_disable_once controller_manager_msgs lifecycle_msgs rclcpp robot_interfaces
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(hardware_interface REQUIRED)
+
+  ament_add_gtest(test_enable_manager_characterization
+    test/test_enable_manager_characterization.cpp
+  )
+  target_compile_features(test_enable_manager_characterization PUBLIC cxx_std_17)
+  target_compile_options(
+    test_enable_manager_characterization PRIVATE -Wall -Wextra -Wpedantic -Wconversion
+  )
+  target_link_libraries(
+    test_enable_manager_characterization enable_manager_controller
+  )
+  ament_target_dependencies(
+    test_enable_manager_characterization
+    controller_manager_msgs
+    hardware_interface
+    rclcpp
+    robot_interfaces
+  )
+endif()
+
 pluginlib_export_plugin_description_file(
   controller_interface enable_manager_plugins.xml
 )

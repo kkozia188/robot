@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<library path="rolling_trajectory_controller_plugin">
+  <class
+    name="rolling_trajectory_controller/RollingTrajectoryController"
+    type="rolling_trajectory_controller::RollingTrajectoryController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>Fixed-capacity rolling-horizon joint position controller.</description>
+  </class>
+</library>

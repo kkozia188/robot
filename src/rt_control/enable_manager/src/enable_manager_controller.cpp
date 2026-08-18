@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -38,6 +39,9 @@ controller_interface::CallbackReturn EnableManagerController::on_init()
   auto_declare<double>("controller_switch_timeout", 4.0);
   auto_declare<int>("service_result_timeout_ms", 30000);
   auto_declare<std::string>("jtc_name", "dual_arm_jtc");
+  auto_declare<std::vector<std::string>>(
+    "motion_controller_names", std::vector<std::string>{});
+  auto_declare<std::string>("default_motion_controller_name", "");
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -76,16 +80,44 @@ controller_interface::CallbackReturn EnableManagerController::on_configure(
   controller_switch_timeout_seconds_ =
     get_node()->get_parameter("controller_switch_timeout").as_double();
   const auto service_timeout = get_node()->get_parameter("service_result_timeout_ms").as_int();
-  jtc_name_ = get_node()->get_parameter("jtc_name").as_string();
+  const std::string legacy_jtc_name = get_node()->get_parameter("jtc_name").as_string();
+  motion_controller_names_ =
+    get_node()->get_parameter("motion_controller_names").as_string_array();
+  std::string default_motion_controller_name =
+    get_node()->get_parameter("default_motion_controller_name").as_string();
+
+  if (motion_controller_names_.empty() && !legacy_jtc_name.empty()) {
+    motion_controller_names_.push_back(legacy_jtc_name);
+  }
+  if (default_motion_controller_name.empty()) {
+    default_motion_controller_name = legacy_jtc_name;
+  }
+  bool valid_motion_controller_registry = !motion_controller_names_.empty();
+  for (auto controller = motion_controller_names_.begin();
+    controller != motion_controller_names_.end(); ++controller)
+  {
+    valid_motion_controller_registry =
+      valid_motion_controller_registry && !controller->empty() &&
+      std::find(motion_controller_names_.begin(), controller, *controller) == controller;
+  }
+  const auto default_controller = std::find(
+    motion_controller_names_.begin(), motion_controller_names_.end(),
+    default_motion_controller_name);
+  valid_motion_controller_registry =
+    valid_motion_controller_registry && default_controller != motion_controller_names_.end();
 
   if (
     batch_timeout_seconds_ <= 0.0 || disable_stage_timeout_seconds_ <= 0.0 ||
     inter_batch_delay_seconds_ < 0.0 || fault_reset_timeout_seconds_ <= 0.0 ||
-    controller_switch_timeout_seconds_ <= 0.0 || service_timeout <= 0 || jtc_name_.empty())
+    controller_switch_timeout_seconds_ <= 0.0 || service_timeout <= 0 ||
+    !valid_motion_controller_registry)
   {
     RCLCPP_ERROR(get_node()->get_logger(), "Invalid enable-manager timing or controller parameter");
     return controller_interface::CallbackReturn::ERROR;
   }
+  default_motion_controller_index_ = static_cast<std::size_t>(
+    std::distance(motion_controller_names_.begin(), default_controller));
+  active_motion_controller_index_.store(kNoMotionController, std::memory_order_release);
   service_result_timeout_ = std::chrono::milliseconds(service_timeout);
 
   enable_callback_group_ =
@@ -135,7 +167,9 @@ controller_interface::CallbackReturn EnableManagerController::on_activate(
   const rclcpp_lifecycle::State &)
 {
   if (command_interfaces_.size() != kAxisCount || state_interfaces_.size() != kAxisCount) {
-    RCLCPP_ERROR(get_node()->get_logger(), "Expected 14 control_word and 14 status_word interfaces");
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Expected 14 control_word and 14 status_word interfaces");
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -374,7 +408,8 @@ void EnableManagerController::handleEnable(
     return;
   }
 
-  const SwitchResult activation_result = switchJtc(true);
+  const SwitchResult activation_result =
+    switchMotionController(default_motion_controller_index_, true);
   if (activation_result != SwitchResult::kSuccess) {
     if (activation_result == SwitchResult::kAmbiguous) {
       restart_required_.store(true, std::memory_order_release);
@@ -460,7 +495,9 @@ void EnableManagerController::handleDisable(
   jtc_deactivate_failed_.store(false, std::memory_order_release);
   if (phase == Phase::kEnabled) {
     phase_.store(Phase::kJtcDeactivating, std::memory_order_release);
-    if (switchJtc(false) != SwitchResult::kSuccess) {
+    if (switchMotionController(controllerIndexForDeactivation(), false) !=
+      SwitchResult::kSuccess)
+    {
       jtc_deactivate_failed_.store(true, std::memory_order_release);
       restart_required_.store(true, std::memory_order_release);
       recordFailure(Stage::kJtcDeactivateFailed, -1, -1, 0U);
@@ -555,8 +592,12 @@ void EnableManagerController::fillImmediateResponse(
   response.stage = stageName(stage);
 }
 
-EnableManagerController::SwitchResult EnableManagerController::switchJtc(bool activate)
+EnableManagerController::SwitchResult EnableManagerController::switchMotionController(
+  std::size_t controller_index, bool activate)
 {
+  if (controller_index >= motion_controller_names_.size()) {
+    return SwitchResult::kFailed;
+  }
   bool expected = false;
   if (!switch_in_progress_.compare_exchange_strong(expected, true)) {
     return SwitchResult::kAmbiguous;
@@ -571,9 +612,9 @@ EnableManagerController::SwitchResult EnableManagerController::switchJtc(bool ac
 
   auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
   if (activate) {
-    request->activate_controllers.push_back(jtc_name_);
+    request->activate_controllers.push_back(motion_controller_names_[controller_index]);
   } else {
-    request->deactivate_controllers.push_back(jtc_name_);
+    request->deactivate_controllers.push_back(motion_controller_names_[controller_index]);
   }
   request->strictness = controller_manager_msgs::srv::SwitchController::Request::STRICT;
   request->activate_asap = true;
@@ -591,8 +632,25 @@ EnableManagerController::SwitchResult EnableManagerController::switchJtc(bool ac
     result = switch_response != nullptr && switch_response->ok ?
       SwitchResult::kSuccess : SwitchResult::kFailed;
   }
+  if (result == SwitchResult::kSuccess) {
+    if (activate) {
+      active_motion_controller_index_.store(controller_index, std::memory_order_release);
+    } else {
+      std::size_t active_controller = controller_index;
+      (void)active_motion_controller_index_.compare_exchange_strong(
+        active_controller, kNoMotionController, std::memory_order_acq_rel);
+    }
+  }
   clear_in_progress();
   return result;
+}
+
+std::size_t EnableManagerController::controllerIndexForDeactivation() const
+{
+  const std::size_t active_controller =
+    active_motion_controller_index_.load(std::memory_order_acquire);
+  return active_controller < motion_controller_names_.size() ?
+         active_controller : default_motion_controller_index_;
 }
 
 void EnableManagerController::handleNonRtFaultStop()
@@ -600,7 +658,9 @@ void EnableManagerController::handleNonRtFaultStop()
   if (!emergency_jtc_deactivate_request_.exchange(false, std::memory_order_acq_rel)) {
     return;
   }
-  if (switchJtc(false) != SwitchResult::kSuccess) {
+  if (switchMotionController(controllerIndexForDeactivation(), false) !=
+    SwitchResult::kSuccess)
+  {
     restart_required_.store(true, std::memory_order_release);
   }
 }
@@ -995,7 +1055,8 @@ void EnableManagerController::updateEnable(std::int64_t now_ns)
       primary_failure_stage_, primary_failed_batch_, invalid_axis,
       primary_failed_status_word_);
     if (enable_preempt_requested_) {
-      publishResult(enable_result_, false, primary_failure_stage_, primary_failed_batch_,
+      publishResult(
+        enable_result_, false, primary_failure_stage_, primary_failed_batch_,
         primary_failed_joint_, primary_failed_status_word_);
       owner_.store(Owner::kDisable, std::memory_order_release);
       disable_request_.store(false, std::memory_order_release);

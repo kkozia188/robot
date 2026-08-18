@@ -5,8 +5,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "controller_interface/controller_interface.hpp"
 #include "controller_manager_msgs/srv/switch_controller.hpp"
@@ -20,6 +22,8 @@
 
 namespace enable_manager
 {
+
+class EnableManagerTestPeer;
 
 class EnableManagerController final : public controller_interface::ControllerInterface
 {
@@ -37,8 +41,12 @@ public:
     const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
 private:
+  friend class EnableManagerTestPeer;
+
   static constexpr std::size_t kAxisCount = 14U;
   static constexpr std::size_t kBatchCount = 5U;
+  static constexpr std::size_t kNoMotionController =
+    std::numeric_limits<std::size_t>::max();
 
   enum class Phase : std::uint8_t
   {
@@ -126,7 +134,8 @@ private:
     const ResultSlot & slot, robot_interfaces::srv::RtEnable::Response & response) const;
   void fillImmediateResponse(
     robot_interfaces::srv::RtEnable::Response & response, bool ok, Stage stage) const;
-  SwitchResult switchJtc(bool activate);
+  SwitchResult switchMotionController(std::size_t controller_index, bool activate);
+  std::size_t controllerIndexForDeactivation() const;
   void handleNonRtFaultStop();
   void publishDiagnostics();
 
@@ -197,7 +206,9 @@ private:
   double fault_reset_timeout_seconds_{4.0};
   double controller_switch_timeout_seconds_{4.0};
   std::chrono::milliseconds service_result_timeout_{30000};
-  std::string jtc_name_{"dual_arm_jtc"};
+  std::vector<std::string> motion_controller_names_{"dual_arm_jtc"};
+  std::size_t default_motion_controller_index_{0U};
+  std::atomic_size_t active_motion_controller_index_{kNoMotionController};
 
   rclcpp::CallbackGroup::SharedPtr enable_callback_group_;
   rclcpp::CallbackGroup::SharedPtr disable_callback_group_;
